@@ -1,0 +1,9 @@
+.git
+__pycache__
+*.py[cod]
+data/*
+!data/.gitkeep
+tests
+tools
+*.sqlite3*
+.pytest_cache

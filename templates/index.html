@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}交接包列表 · 流速断面交接台{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>建包</h1>
+  <p class="hint">
+    先上传清单，逐项列明片号、字节数与 SHA-256。同一份清单再次上传会沿用已有交付记录，不会新建。
+  </p>
+  <form class="stack" method="post" action="{{ url_for('main.create_package_page') }}" enctype="multipart/form-data">
+    <label class="file">
+      <span>清单文件（JSON）</span>
+      <input type="file" name="manifest" accept=".json,application/json,text/plain">
+    </label>
+    <label class="field">
+      <span>或粘贴清单内容</span>
+      <textarea name="manifest_text" rows="7" placeholder='{"label": "2026-11-24 长江断面", "shards": [{"index": 0, "size": 1048576, "sha256": "…"}, …]}'></textarea>
+    </label>
+    <button type="submit" class="primary">建立交接包</button>
+  </form>
+</section>
+
+<section class="card">
+  <h1>交付记录</h1>
+  {% if deliveries %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th><th>交接包</th><th>清单摘要</th><th class="num">片数</th>
+          <th class="num">缺片</th><th>恢复</th><th>更新时间</th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for d in deliveries %}
+        <tr>
+          <td class="mono">{{ d.id }}</td>
+          <td>{{ d.label }}</td>
+          <td class="mono small" title="{{ d.manifest_hash }}">{{ d.manifest_hash[:16] }}…</td>
+          <td class="num">{{ d.total_shards }}</td>
+          <td class="num">
+            {% if d.missing_count == 0 %}<span class="pill ok">齐</span>
+            {% else %}<span class="pill warn">{{ d.missing_count }}</span>{% endif %}
+          </td>
+          <td>
+            {% if d.recovered_index is not none %}
+              <span class="pill info">片 {{ d.recovered_index }}</span>
+            {% else %}—{% endif %}
+          </td>
+          <td class="small">{{ d.updated_at | ts }}</td>
+          <td><a class="link" href="{{ url_for('main.package_detail', delivery_id=d.id) }}">查看</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">还没有交付记录。先在上方建立交接包。</p>
+  {% endif %}
+</section>
+{% endblock %}

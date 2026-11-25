@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}流速断面交接台{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('main.index') }}">
+    <span class="mark">⌁</span>
+    <span>流速断面交接台</span>
+  </a>
+  <span class="tag">原文件交接 · 清单验收 · 校验片恢复</span>
+</header>
+
+<main class="wrap">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="flashes">
+        {% for category, message in messages %}
+          <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+
+<footer class="foot">
+  数据写入后端 SQLite，原件按片存放；恢复与下载均以固定大小分块流式处理。
+</footer>
+</body>
+</html>

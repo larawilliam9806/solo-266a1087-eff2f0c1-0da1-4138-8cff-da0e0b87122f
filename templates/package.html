@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% set d = state.delivery %}
+{% set m = state.manifest %}
+{% set target = state.recovery_target %}
+{% block title %}交接包 {{ d.id }} · 流速断面交接台{% endblock %}
+{% block content %}
+
+<section class="card">
+  <div class="row spread">
+    <h1>{{ d.label }}</h1>
+    <span class="mono small">#{{ d.id }}</span>
+  </div>
+  <dl class="meta">
+    <div><dt>清单文件</dt><dd>{{ d.manifest_name or "—" }}</dd></div>
+    <div><dt>清单摘要</dt><dd class="mono small">{{ d.manifest_hash }}</dd></div>
+    <div><dt>片数</dt><dd>{{ state.accepted_count }} / {{ state.total_count }}</dd></div>
+    <div><dt>总字节数</dt><dd>{{ m.total_bytes | filesize }} <span class="mono small">({{ m.total_bytes }})</span></dd></div>
+    <div><dt>校验片长度</dt><dd>{{ m.max_size | filesize }} <span class="mono small">({{ m.max_size }})</span></dd></div>
+    <div><dt>恢复</dt><dd>
+      {% if d.recovered_index is not none %}
+        <span class="pill info">使用了恢复数据 · 片 {{ d.recovered_index }}</span>
+      {% else %}
+        <span class="pill">未使用</span>
+      {% endif %}
+    </dd></div>
+    <div><dt>建立 / 更新</dt><dd class="small">{{ d.created_at | ts }} → {{ d.updated_at | ts }}</dd></div>
+  </dl>
+
+  {% if state.missing %}
+    {% if state.recovery_allowed %}
+      <div class="banner warn">
+        尚缺 1 片：<strong class="mono">{{ state.missing[0] }}</strong>
+        <span class="sep">·</span> 恰好缺一片，可用校验片恢复。
+      </div>
+    {% else %}
+      <div class="banner warn">
+        尚缺 {{ state.missing | length }} 片：<strong class="mono">{{ state.missing | join(", ") }}</strong>
+        <span class="sep">·</span> 校验片恢复仅在恰好缺一片时开放。
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="banner ok">
+      清单内各片已集齐并全部通过哈希核验，可按片号升序拼接下载。
+    </div>
+    <a class="button primary" href="{{ url_for('main.download_page', delivery_id=d.id) }}">按片号升序拼接下载</a>
+  {% endif %}
+</section>
+
+{% if state.recovery_allowed %}
+<section class="card">
+  <h2>用校验片恢复缺片</h2>
+  <p class="hint">
+    校验片是原片尾部补零至最长片（{{ m.max_size | filesize }}）后逐字节异或所得。
+    上传后由校验片与其余已验收片逐字节异或恢复缺片，截回清单长度
+    （片 {{ target.index }}，{{ target.size }} 字节），再通过 SHA-256 核验才计入交付。
+  </p>
+  <form class="stack" method="post"
+        action="{{ url_for('main.recover_page', delivery_id=d.id) }}"
+        enctype="multipart/form-data">
+    <input type="hidden" name="index" value="{{ state.missing[0] }}">
+    <label class="file">
+      <span>校验片文件</span>
+      <input type="file" name="checkshard" required>
+    </label>
+    <button type="submit" class="primary">恢复片 {{ state.missing[0] }}</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>逐片上传验收</h2>
+  <p class="hint">每一片上传后都会核验字节数与 SHA-256，不符则拒收且不影响已验收的片。</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">片号</th><th class="num">字节数</th><th>SHA-256</th>
+          <th>状态</th><th>来源</th><th>验收时间</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in state.shards %}
+        <tr class="{{ 'row-done' if s.accepted else 'row-missing' }}">
+          <td class="num mono">{{ s.index }}{% if s.is_longest %} <span class="pill mini">最长</span>{% endif %}</td>
+          <td class="num mono">{{ s.size }}</td>
+          <td class="mono tiny" title="{{ s.sha256 }}">{{ s.sha256[:20] }}…</td>
+          <td>
+            {% if s.accepted %}<span class="pill ok">已验收</span>
+            {% else %}<span class="pill warn">缺</span>{% endif %}
+          </td>
+          <td>
+            {% if s.source == 'recovered' %}<span class="pill info">恢复</span>
+            {% elif s.source == 'upload' %}实交
+            {% else %}—{% endif %}
+          </td>
+          <td class="small">{{ s.accepted_at | ts }}</td>
+          <td>
+            {% if s.accepted %}
+              <span class="small muted">已入账</span>
+            {% else %}
+            <form class="inline" method="post"
+                  action="{{ url_for('main.upload_shard_page', delivery_id=d.id, index=s.index) }}"
+                  enctype="multipart/form-data">
+              <input type="file" name="file" required>
+              <button type="submit">上传验收</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <h2>交付记录说明</h2>
+  <ul class="notes">
+    <li>同一原片重传沿用已有记录：已验收的片再次提交时不会重复写入，返回「沿用已有记录」。</li>
+    <li>末片实交与恢复同时提交时只完成一次：写锁内复核状态，后到的一方只读不写。</li>
+    <li>交付记录始终注明是否使用了恢复数据及其片号。</li>
+    <li>校验或写入失败时，已验收的片仍然保留可用，状态不变。</li>
+  </ul>
+  <p class="small muted">
+    本包累计下载 {{ d.download_count }} 次{% if d.last_download_at %}，最近一次 {{ d.last_download_at | ts }}{% endif %}。
+  </p>
+</section>
+{% endblock %}

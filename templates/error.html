@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} · 流速断面交接台{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>{{ code }}</h1>
+  <p class="banner warn">{{ message }}</p>
+  <a class="button" href="{{ url_for('main.index') }}">返回交接包列表</a>
+</section>
+{% endblock %}

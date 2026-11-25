@@ -1,0 +1,32 @@
+services:
+  handover:
+    build: .
+    image: flow-section-handover:latest
+    container_name: flow-section-handover
+    restart: unless-stopped
+    ports:
+      - "${HANDOVER_PORT:-8000}:8000"
+    environment:
+      # 数据卷挂载点：SQLite 交付记录与各片原件都落在这里，便于备份。
+      DATA_DIR: /srv/data
+      THREADS: "${HANDOVER_THREADS:-8}"
+      # 可选：请求体总上限（字节）。不设置则不限，逐片校验仍以清单长度为准。
+      # MAX_UPLOAD_BYTES: "17179869184"
+      CHUNK_SIZE: "${CHUNK_SIZE:-1048576}"
+      # 固定会话密钥可保证容器重建后 flash 提示不被丢弃；不设则每次启动随机。
+      SECRET_KEY: "${SECRET_KEY:-}"
+    volumes:
+      - handover-data:/srv/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  handover-data:
