@@ -164,14 +164,29 @@ def recover_part(
                 pass
 
 
-def iter_part(path: str, chunk_size: int = READ_SIZE):
-    """按固定块大小产出单片字节，用于按片号升序流式拼接下载。"""
-    with open(path, "rb") as handle:
-        while True:
-            block = handle.read(chunk_size)
-            if not block:
-                break
-            yield block
+def iter_part_exact(path: str, size: int, chunk_size: int = READ_SIZE):
+    """按清单字节数产出单片：恰好 size 字节，用于按片号升序流式拼接下载。
+
+    文件过短（读不满 size）、过长（size 之外仍有数据）或读取失败时
+    抛 CodecError；调用方必须中止整个响应，不得用后续分片凑够总长度。
+    """
+    remaining = size
+    try:
+        with open(path, "rb") as handle:
+            while remaining > 0:
+                block = handle.read(min(chunk_size, remaining))
+                if not block:
+                    raise CodecError(
+                        f"{os.path.basename(path)} 不足清单的 {size} 字节，中止输出"
+                    )
+                remaining -= len(block)
+                yield block
+            if handle.read(1):
+                raise CodecError(
+                    f"{os.path.basename(path)} 超出清单的 {size} 字节，中止输出"
+                )
+    except OSError as exc:
+        raise CodecError(f"读取分片失败：{exc.strerror or exc}") from exc
 
 
 def checkshard_bytes(parts: list[bytes], length: int) -> bytes:

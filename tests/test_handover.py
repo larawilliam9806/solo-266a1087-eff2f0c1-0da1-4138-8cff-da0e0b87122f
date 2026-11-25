@@ -16,6 +16,8 @@ import unittest
 
 from app import create_app
 from app import codec
+from app import service
+from app import storage
 
 
 def sha(data: bytes) -> str:
@@ -361,6 +363,189 @@ class HandoverTestCase(unittest.TestCase):
         )
         self.assertEqual(page.status_code, 200)
         self.assertIn("已验收", page.get_data(as_text=True))
+
+    # ---------------------------------------------------------------- 下载计数
+    def download_state(self, delivery_id):
+        return self.client.get(f"/api/packages/{delivery_id}").get_json()
+
+    def complete_package(self):
+        delivery_id = self.create().get_json()["id"]
+        self.upload_all_except(delivery_id, skip=None)
+        return delivery_id
+
+    def test_download_counted_once_per_full_stream(self):
+        delivery_id = self.complete_package()
+        expected = b"".join(self.parts)
+
+        first = self.client.get(f"/api/packages/{delivery_id}/download")
+        self.assertEqual(first.data, expected)
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 1)
+        self.assertIsNotNone(state["last_download_at"])
+
+        second = self.client.get(f"/api/packages/{delivery_id}/download")
+        self.assertEqual(second.data, expected)
+        self.assertEqual(self.download_state(delivery_id)["download_count"], 2)
+
+    def test_head_download_keeps_counters(self):
+        delivery_id = self.complete_package()
+        total = str(sum(map(len, self.parts)))
+        for url in (
+            f"/api/packages/{delivery_id}/download",
+            f"/packages/{delivery_id}/download",
+        ):
+            response = self.client.head(url)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["Content-Length"], total)
+            self.assertEqual(response.data, b"")
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 0)
+        self.assertIsNone(state["last_download_at"])
+
+    def test_early_close_keeps_counters(self):
+        delivery_id = self.complete_package()
+        response = self.client.get(f"/packages/{delivery_id}/download")
+        response.close()  # 客户端提前关闭，未读完整条流
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 0)
+        self.assertIsNone(state["last_download_at"])
+
+    def test_aborted_download_preserves_previous_counters(self):
+        delivery_id = self.complete_package()
+        self.client.get(f"/api/packages/{delivery_id}/download").get_data()
+        before = self.download_state(delivery_id)
+        self.assertEqual(before["download_count"], 1)
+
+        aborted = self.client.get(f"/api/packages/{delivery_id}/download")
+        aborted.close()
+        after = self.download_state(delivery_id)
+        self.assertEqual(after["download_count"], 1)
+        self.assertEqual(after["last_download_at"], before["last_download_at"])
+
+    def test_short_shard_aborts_response_without_counting(self):
+        delivery_id = self.complete_package()
+        path = storage.part_path(self.tmp.name, delivery_id, 1)
+        with open(path, "r+b") as handle:
+            handle.truncate(len(self.parts[1]) - 3)  # 分片过短
+        with self.assertRaises(codec.CodecError):
+            self.client.get(f"/api/packages/{delivery_id}/download").get_data()
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 0)
+        self.assertIsNone(state["last_download_at"])
+
+    def test_long_shard_aborts_response_without_counting(self):
+        delivery_id = self.complete_package()
+        path = storage.part_path(self.tmp.name, delivery_id, 2)
+        with open(path, "ab") as handle:
+            handle.write(b"extra")  # 分片过长
+        with self.assertRaises(codec.CodecError):
+            self.client.get(f"/api/packages/{delivery_id}/download").get_data()
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 0)
+        self.assertIsNone(state["last_download_at"])
+
+    def test_unreadable_shard_aborts_response_without_counting(self):
+        delivery_id = self.complete_package()
+        os.unlink(storage.part_path(self.tmp.name, delivery_id, 0))  # 读取失败
+        with self.assertRaises(codec.CodecError):
+            self.client.get(f"/api/packages/{delivery_id}/download").get_data()
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 0)
+        self.assertIsNone(state["last_download_at"])
+
+    def test_concurrent_full_downloads_each_count(self):
+        delivery_id = self.complete_package()
+        expected = b"".join(self.parts)
+        results: list[bytes] = []
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+
+        def download():
+            client = self.app.test_client()
+            barrier.wait()
+            data = client.get(f"/api/packages/{delivery_id}/download").data
+            with lock:
+                results.append(data)
+
+        threads = [threading.Thread(target=download) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(results), sorted([expected, expected]))
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 2)
+        self.assertIsNotNone(state["last_download_at"])
+
+    def test_concurrent_downloads_counted_by_own_result(self):
+        delivery_id = self.complete_package()
+        barrier = threading.Barrier(2)
+
+        def full():
+            client = self.app.test_client()
+            barrier.wait()
+            client.get(f"/api/packages/{delivery_id}/download").get_data()
+
+        def aborted():
+            client = self.app.test_client()
+            barrier.wait()
+            client.get(f"/api/packages/{delivery_id}/download").close()
+
+        threads = [threading.Thread(target=full), threading.Thread(target=aborted)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        state = self.download_state(delivery_id)
+        self.assertEqual(state["download_count"], 1)
+        self.assertIsNotNone(state["last_download_at"])
+
+    def test_paused_download_does_not_block_other_acceptance(self):
+        delivery_id = self.complete_package()
+        other = self.create(
+            make_manifest([b"other-package-payload"], label="另一包")
+        ).get_json()["id"]
+
+        with self.app.app_context():
+            _delivery, _manifest, generate = service.open_download(delivery_id)
+            stream = generate()
+            self.assertTrue(next(stream))  # 读出第一块后暂停，连接挂着不动
+            # 暂停期间，另一个交接包仍能完成验收
+            self.upload(other, 0, b"other-package-payload", expect=(201,))
+            stream.close()
+        self.assertEqual(self.download_state(delivery_id)["download_count"], 0)
+        self.assertTrue(self.download_state(other)["shards"][0]["accepted"])
+
+    def test_download_follows_ascending_shard_order(self):
+        shuffled = {
+            "label": "乱序清单",
+            "shards": [
+                {"index": 2, "size": len(self.parts[2]), "sha256": sha(self.parts[2])},
+                {"index": 0, "size": len(self.parts[0]), "sha256": sha(self.parts[0])},
+                {"index": 3, "size": len(self.parts[3]), "sha256": sha(self.parts[3])},
+                {"index": 1, "size": len(self.parts[1]), "sha256": sha(self.parts[1])},
+            ],
+        }
+        delivery_id = self.create(shuffled).get_json()["id"]
+        self.upload_all_except(delivery_id, skip=None)
+        response = self.client.get(f"/api/packages/{delivery_id}/download")
+        self.assertEqual(response.data, b"".join(self.parts))
+        self.assertEqual(response.headers["X-Shard-Order"], "0,1,2,3")
+
+    def test_page_shows_download_count(self):
+        delivery_id = self.complete_package()
+        html = self.client.get(f"/packages/{delivery_id}").get_data(as_text=True)
+        self.assertIn("累计下载 0 次", html)
+
+        response = self.client.get(f"/packages/{delivery_id}/download")
+        self.assertEqual(response.data, b"".join(self.parts))
+        html = self.client.get(f"/packages/{delivery_id}").get_data(as_text=True)
+        self.assertIn("累计下载 1 次", html)
+
+        aborted = self.client.get(f"/packages/{delivery_id}/download")
+        aborted.close()
+        html = self.client.get(f"/packages/{delivery_id}").get_data(as_text=True)
+        self.assertIn("累计下载 1 次", html)
 
 
 if __name__ == "__main__":

@@ -410,7 +410,11 @@ def recover_missing(delivery_id: int, index: int, file_storage) -> dict:
 
 
 def open_download(delivery_id: int):
-    """拼接下载：集齐后才开放；按片号升序、固定块大小流式输出。"""
+    """拼接下载：集齐后才开放；按片号升序、逐片按清单字节数流式输出。
+
+    返回 (delivery, manifest, generate)。下载次数只在 generate 完整输出
+    后入账一次；客户端提前断开、分片过短/过长/读取失败或 HEAD 请求都不计。
+    """
     conn = db.get_db()
     delivery = _delivery(conn, delivery_id)
     manifest = _manifest_of(delivery)
@@ -424,18 +428,44 @@ def open_download(delivery_id: int):
 
     chunk = _chunk()
     data_dir = _data_dir()
+    database = current_app.config["DATABASE"]
+    # 流式输出发生在请求上下文结束之后，闭包只携带普通值，不依赖 flask g。
+    # manifest.shards 已按片号升序；逐片以清单上的字节数为准。
+    parts = [
+        (storage.part_path(data_dir, delivery_id, spec.index), spec.size)
+        for spec in manifest.shards
+    ]
 
     def generate():
-        for row in rows:
-            path = storage.part_path(data_dir, delivery_id, row["shard_index"])
-            yield from codec.iter_part(path, chunk)
+        completed = False
+        try:
+            for path, size in parts:
+                yield from codec.iter_part_exact(path, size, chunk)
+            completed = True
+        finally:
+            # 只有完整输出才入账；提前关闭（GeneratorExit）或读取失败不计。
+            if completed:
+                record_download(database, delivery_id)
 
-    now = db.utcnow()
-    with db.write_tx(conn):
-        conn.execute(
-            """UPDATE deliveries
-               SET download_count = download_count + 1, last_download_at = ?
-               WHERE id = ?""",
-            (now, int(delivery_id)),
-        )
     return delivery, manifest, generate
+
+
+def record_download(database: str, delivery_id: int) -> None:
+    """一次完整输出落账：下载次数 +1，最近下载时间取各次完成时刻的最晚值。
+
+    独立连接的短事务：流式输出期间不持有任何连接或锁，下载暂停不妨碍
+    其他交接包的验收写入；同一包的并发下载各按自身结果入账。
+    """
+    conn = db.connect(database)
+    try:
+        now = db.utcnow()
+        with db.write_tx(conn):
+            conn.execute(
+                """UPDATE deliveries
+                   SET download_count = download_count + 1,
+                       last_download_at = MAX(COALESCE(last_download_at, ''), ?)
+                   WHERE id = ?""",
+                (now, int(delivery_id)),
+            )
+    finally:
+        conn.close()

@@ -77,6 +77,8 @@ def _state_json(state: dict) -> dict:
         "manifest_hash": delivery["manifest_hash"],
         "created_at": delivery["created_at"],
         "updated_at": delivery["updated_at"],
+        "download_count": delivery["download_count"],
+        "last_download_at": delivery["last_download_at"],
         "total_shards": state["total_count"],
         "total_bytes": manifest.total_bytes,
         "accepted_count": state["accepted_count"],
@@ -218,7 +220,9 @@ def _download_response(delivery_id: int):
         _delivery, manifest, stream = service.open_download(delivery_id)
     except service.HandoverError as exc:
         return _error_response(exc)
-    response = Response(stream(), mimetype="application/octet-stream")
+    # HEAD 只返回头部：不输出字节流，也不计下载次数。
+    body = () if request.method == "HEAD" else stream()
+    response = Response(body, mimetype="application/octet-stream")
     response.headers["Content-Disposition"] = (
         f'attachment; filename="flow-section-{delivery_id}.bin"'
     )
